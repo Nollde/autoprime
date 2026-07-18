@@ -6,6 +6,7 @@ implementation is fair game.
 
 import math
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -20,6 +21,7 @@ SEGMENT = 5_600_000
 # concurrent write streams the shared bandwidth saturates and it slows down.
 MAX_WORKERS = min(4, os.cpu_count() or 1)
 _POOL = ThreadPoolExecutor(max_workers=MAX_WORKERS) if MAX_WORKERS > 1 else None
+_LOCAL = threading.local()  # per-thread reusable sieve buffer
 
 
 def _small_odd_primes(limit):
@@ -71,7 +73,10 @@ def primes(n):
 
     def sieve_segment(jbase):
         cnt = min(SEGMENT, m - jbase)
-        buf = np.ones(cnt, dtype=bool)
+        buf = getattr(_LOCAL, "buf", None)
+        if buf is None or buf.size < cnt:
+            buf = _LOCAL.buf = np.empty(SEGMENT, dtype=bool)
+        buf[:cnt] = True
         for s, (gB, gA) in zip(strides, first):
             for g in (gB, gA):
                 if g >= jbase:
@@ -80,7 +85,7 @@ def primes(n):
                     ls = g + ((jbase - g + s - 1) // s) * s - jbase
                 if ls < cnt:
                     buf[ls:cnt:s] = False
-        j = np.flatnonzero(buf)
+        j = np.flatnonzero(buf[:cnt])
         j += jbase  # global interleaved index
         return j
 
