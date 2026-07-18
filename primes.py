@@ -5,13 +5,18 @@ implementation is fair game.
 """
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-# Segment size in number of wheel entries. Sized so each segment's write
-# traffic stays cache-resident instead of thrashing the full ~n/3 array once
-# per small prime. ~12M entries (~12 MB) is empirically the sweet spot at n=1e8.
-SEGMENT = 12_000_000
+# Segment size in number of wheel entries. Sized both to stay cache-resident
+# and to split n=1e8 into ~4 independent segments. numpy releases the GIL for
+# the strided fills and flatnonzero, so the segments run in parallel threads.
+SEGMENT = 8_500_000
+# Memory bandwidth (not cores) is the limit for the strided writes: past ~4
+# concurrent write streams the shared bandwidth saturates and it slows down.
+MAX_WORKERS = min(4, os.cpu_count() or 1)
 
 
 def _small_odd_primes(limit):
@@ -26,15 +31,15 @@ def _small_odd_primes(limit):
 
 
 def primes(n):
-    """Segmented mod-6 wheel sieve of Eratosthenes.
+    """Segmented, multithreaded mod-6 wheel sieve of Eratosthenes.
 
     Only numbers coprime to 6 are represented (density 1/3 vs 1/2 for odd-only),
-    interleaved into a single array so the result comes out already sorted:
+    interleaved into a single index space so the result comes out already sorted:
         even index j = 2i  -> value 6i+5  (== 5 mod 6)
         odd  index j = 2i+1 -> value 6i+7  (== 1 mod 6)
     so value(j) = 3*j + 5 - (j & 1). Crossing out multiples of a prime p hits
-    each residue class with stride 2p. The range is processed in cache-sized
-    segments, and survivors are written straight into a preallocated output.
+    each residue class with stride 2p. The index space is cut into cache-sized
+    segments processed independently, which also makes them trivially parallel.
     """
     if n < 5:
         return np.array([x for x in (2, 3) if x <= n], dtype=np.int64)
@@ -61,16 +66,9 @@ def primes(n):
         strides.append(2 * p)
         first.append((2 * i0, 2 * i1 + 1))
 
-    # Preallocated output: 2, 3, then wheel survivors. pi(n) < 1.3 n / ln n (n>=17).
-    cap = 2 + max(6, int(1.3 * n / math.log(n)))
-    out = np.empty(cap, dtype=np.int64)
-    out[0], out[1] = 2, 3
-    pos = 2
-
-    buf = np.empty(SEGMENT, dtype=bool)
-    for jbase in range(0, m, SEGMENT):
+    def sieve_segment(jbase):
         cnt = min(SEGMENT, m - jbase)
-        buf[:cnt] = True
+        buf = np.ones(cnt, dtype=bool)
         for s, (gB, gA) in zip(strides, first):
             for g in (gB, gA):
                 if g >= jbase:
@@ -79,13 +77,18 @@ def primes(n):
                     ls = g + ((jbase - g + s - 1) // s) * s - jbase
                 if ls < cnt:
                     buf[ls:cnt:s] = False
-        j = np.flatnonzero(buf[:cnt])
-        k = j.size
-        seg = out[pos : pos + k]
+        j = np.flatnonzero(buf)
         j += jbase  # global interleaved index
-        np.multiply(j, 3, out=seg)
-        np.add(seg, 5, out=seg)
-        np.subtract(seg, j & 1, out=seg)  # value = 3j + 5 - (j & 1)
-        pos += k
+        v = 3 * j
+        v += 5
+        v -= j & 1  # value = 3j + 5 - (j & 1)
+        return v
 
-    return out[:pos]
+    bases = range(0, m, SEGMENT)
+    if MAX_WORKERS > 1:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            parts = list(ex.map(sieve_segment, bases))
+    else:
+        parts = [sieve_segment(b) for b in bases]
+
+    return np.concatenate([np.array([2, 3], dtype=np.int64), *parts])
