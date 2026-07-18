@@ -4,7 +4,6 @@ in increasing order (list or numpy array of ints). Everything else about the
 implementation is fair game.
 """
 
-import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
