@@ -57,8 +57,11 @@ def primes(n):
     iA = (n - 7) // 6  # class 6i+7
     m = max(2 * iB, 2 * iA + 1) + 1
 
-    # Per prime, stride 2p and the first crossout index in each residue class.
-    strides, first = [], []
+    # Per (prime, residue class): stride 2p and the first index whose value is a
+    # multiple of p that is >= p*p. Two entries per prime, kept as numpy arrays so
+    # each segment's start offsets are computed vectorized (the per-prime scalar
+    # math would otherwise run under the GIL and serialize the worker threads).
+    g_list, s_list = [], []
     for p in sp.tolist():
         if p < 5:
             continue
@@ -68,8 +71,11 @@ def primes(n):
         i0 += (((-5 * inv6) % p) - i0) % p  # ... and (6i+5) % p == 0
         i1 = max(0, (pp - 7 + 5) // 6)  # smallest i with 6i+7 >= p*p ...
         i1 += (((-7 * inv6) % p) - i1) % p  # ... and (6i+7) % p == 0
-        strides.append(2 * p)
-        first.append((2 * i0, 2 * i1 + 1))
+        g_list += (2 * i0, 2 * i1 + 1)  # even index = class 6i+5, odd = class 6i+7
+        s_list += (2 * p, 2 * p)
+    G = np.array(g_list, dtype=np.int64)
+    S = np.array(s_list, dtype=np.int64)
+    S_py = s_list  # plain list is faster to iterate than a numpy array
 
     def sieve_segment(jbase):
         cnt = min(SEGMENT, m - jbase)
@@ -77,14 +83,13 @@ def primes(n):
         if buf is None or buf.size < cnt:
             buf = _LOCAL.buf = np.empty(SEGMENT, dtype=bool)
         buf[:cnt] = True
-        for s, (gB, gA) in zip(strides, first):
-            for g in (gB, gA):
-                if g >= jbase:
-                    ls = g - jbase
-                else:
-                    ls = g + ((jbase - g + s - 1) // s) * s - jbase
-                if ls < cnt:
-                    buf[ls:cnt:s] = False
+        # First local crossout offset per (prime, class): advance G up to jbase.
+        d = jbase - G
+        k = np.where(d > 0, (d + S - 1) // S, 0)
+        starts = (G + k * S - jbase).tolist()
+        for ls, s in zip(starts, S_py):
+            if ls < cnt:
+                buf[ls:cnt:s] = False
         j = np.flatnonzero(buf[:cnt])
         j += jbase  # global interleaved index
         return j
