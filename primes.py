@@ -82,15 +82,28 @@ def primes(n):
                     buf[ls:cnt:s] = False
         j = np.flatnonzero(buf)
         j += jbase  # global interleaved index
-        v = 3 * j
-        v += 5
-        v -= j & 1  # value = 3j + 5 - (j & 1)
-        return v
+        return j
 
     bases = range(0, m, SEGMENT)
-    if _POOL is not None:
-        parts = list(_POOL.map(sieve_segment, bases))
-    else:
-        parts = [sieve_segment(b) for b in bases]
+    _map = _POOL.map if _POOL is not None else map
 
-    return np.concatenate([np.array([2, 3], dtype=np.int64), *parts])
+    # Phase 1: sieve every segment, collecting the surviving interleaved indices.
+    survivors = list(_map(sieve_segment, bases))
+
+    # Phase 2: turn indices into values straight into a preallocated output at
+    # each segment's offset, so the writes stay parallel (no serial concatenate).
+    offsets = [2]
+    for j in survivors:
+        offsets.append(offsets[-1] + j.size)
+    out = np.empty(offsets[-1], dtype=np.int64)
+    out[0], out[1] = 2, 3
+
+    def emit(idx):
+        j = survivors[idx]
+        seg = out[offsets[idx] : offsets[idx + 1]]
+        np.multiply(j, 3, out=seg)
+        np.add(seg, 5, out=seg)
+        np.subtract(seg, j & 1, out=seg)  # value = 3j + 5 - (j & 1)
+
+    list(_map(emit, range(len(survivors))))
+    return out
