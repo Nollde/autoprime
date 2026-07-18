@@ -6,10 +6,10 @@ implementation is fair game.
 
 import numpy as np
 
-# Segment size in number of odd entries. Chosen so each segment's write
-# traffic stays cache-friendly relative to streaming the full n/2 array once
-# per small prime. ~8M odds (~16 MB) is empirically the sweet spot at n=1e8.
-SEGMENT_ODDS = 8_000_000
+# Segment size in number of wheel entries. Sized so each segment's write
+# traffic stays cache-friendly instead of thrashing the full ~n/3 array once
+# per small prime. ~12M entries (~12 MB) is empirically the sweet spot at n=1e8.
+SEGMENT = 12_000_000
 
 
 def _small_odd_primes(limit):
@@ -24,44 +24,59 @@ def _small_odd_primes(limit):
 
 
 def primes(n):
-    """Segmented odd-only sieve of Eratosthenes.
+    """Segmented mod-6 wheel sieve of Eratosthenes.
 
-    The [0, n] range of odd numbers is processed in cache-sized segments. Each
-    segment is crossed out by every prime <= sqrt(n), which keeps the working
-    set hot in cache instead of thrashing the full n/2 array once per prime.
+    Only numbers coprime to 6 are represented (density 1/3 vs 1/2 for odd-only),
+    interleaved into a single array so the result comes out already sorted:
+        even index j = 2i  -> value 6i+5  (== 5 mod 6)
+        odd  index j = 2i+1 -> value 6i+7  (== 1 mod 6)
+    so value(j) = 3*j + 5 - (j & 1). Crossing out multiples of a prime p hits
+    each residue class with stride 2p. The range is processed in cache-sized
+    segments to keep the working set hot.
     """
-    if n < 2:
-        return np.array([], dtype=np.int64)
-    if n == 2:
-        return np.array([2], dtype=np.int64)
+    if n < 5:
+        return np.array([x for x in (2, 3) if x <= n], dtype=np.int64)
 
     limit = int(n**0.5)
-    sp = _small_odd_primes(limit)  # odd primes <= sqrt(n)
-    total_odds = (n - 1) // 2 + 1  # index i -> value 2*i+1
+    sp = _small_odd_primes(limit)  # 3 is harmless (its multiples aren't in the wheel)
 
-    seg = SEGMENT_ODDS
-    buf = np.empty(seg, dtype=bool)
-    out_chunks = [np.array([2], dtype=np.int64)]
+    # Highest interleaved index j whose value is <= n.
+    iB = (n - 5) // 6  # class 6i+5
+    iA = (n - 7) // 6  # class 6i+7
+    m = max(2 * iB, 2 * iA + 1) + 1
 
-    for base in range(0, total_odds, seg):
-        cnt = min(seg, total_odds - base)
+    # Per prime, precompute stride 2p and the first crossout index in each class.
+    strides, first = [], []
+    for p in sp.tolist():
+        if p < 5:
+            continue
+        inv6 = pow(6, -1, p)
+        pp = p * p
+        # class 6i+5 (even j): smallest i with 6i+5 >= p*p and (6i+5) % p == 0
+        i0 = (pp - 5 + 5) // 6
+        i0 += (((-5 * inv6) % p) - i0) % p
+        gB = 2 * i0
+        # class 6i+7 (odd j): smallest i with 6i+7 >= p*p and (6i+7) % p == 0
+        i1 = max(0, (pp - 7 + 5) // 6)
+        i1 += (((-7 * inv6) % p) - i1) % p
+        gA = 2 * i1 + 1
+        strides.append(2 * p)
+        first.append((gB, gA))
+
+    buf = np.empty(SEGMENT, dtype=bool)
+    chunks = [np.array([2, 3], dtype=np.int64)]
+    for jbase in range(0, m, SEGMENT):
+        cnt = min(SEGMENT, m - jbase)
         buf[:cnt] = True
-        lo = 2 * base + 1  # first odd value in this segment
-        hi = lo + 2 * (cnt - 1)  # last odd value in this segment
-        for p in sp:
-            pp = p * p
-            if pp > hi:
-                break  # remaining primes only matter in later segments
-            if pp >= lo:
-                m = pp
-            else:
-                # smallest multiple of p that is >= lo, forced odd (p is odd)
-                m = ((lo + p - 1) // p) * p
-                if m % 2 == 0:
-                    m += p
-            buf[(m - lo) // 2 : cnt : p] = False
-        if base == 0:
-            buf[0] = False  # value 1 is not prime
-        out_chunks.append(2 * (base + np.flatnonzero(buf[:cnt])) + 1)
+        for s, (gB, gA) in zip(strides, first):
+            for g in (gB, gA):
+                if g >= jbase:
+                    ls = g - jbase
+                else:
+                    ls = g + ((jbase - g + s - 1) // s) * s - jbase
+                if ls < cnt:
+                    buf[ls:cnt:s] = False
+        j = np.flatnonzero(buf[:cnt]) + jbase
+        chunks.append(3 * j + 5 - (j & 1))
 
-    return np.concatenate(out_chunks)
+    return np.concatenate(chunks)
