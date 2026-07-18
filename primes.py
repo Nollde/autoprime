@@ -11,12 +11,15 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 # Segment size in number of wheel entries. Sized both to stay cache-resident
-# and to split n=1e8 into ~4 independent segments. numpy releases the GIL for
-# the strided fills and flatnonzero, so the segments run in parallel threads.
-SEGMENT = 8_500_000
+# and to split n=1e8 into ~6 independent segments. numpy releases the GIL for
+# the strided fills and flatnonzero, so the segments run in parallel threads;
+# a few more segments than workers lets the pool balance the uneven load (early
+# segments have fewer active primes than late ones).
+SEGMENT = 5_600_000
 # Memory bandwidth (not cores) is the limit for the strided writes: past ~4
 # concurrent write streams the shared bandwidth saturates and it slows down.
 MAX_WORKERS = min(4, os.cpu_count() or 1)
+_POOL = ThreadPoolExecutor(max_workers=MAX_WORKERS) if MAX_WORKERS > 1 else None
 
 
 def _small_odd_primes(limit):
@@ -85,9 +88,8 @@ def primes(n):
         return v
 
     bases = range(0, m, SEGMENT)
-    if MAX_WORKERS > 1:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            parts = list(ex.map(sieve_segment, bases))
+    if _POOL is not None:
+        parts = list(_POOL.map(sieve_segment, bases))
     else:
         parts = [sieve_segment(b) for b in bases]
 
