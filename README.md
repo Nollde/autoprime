@@ -63,3 +63,7 @@ Each step is a git commit on the `autoresearch/*` branch plus a row in `results.
 ## Rules
 
 Python standard library + numpy only. No sympy, no primesieve, no compiled extensions. The evaluation harness is read-only. `n` stays fixed across a run.
+
+## Credits
+
+The autoresearch idea — letting an LLM run its own experiment loop — is based on Andrej Karpathy's [autoresearch](https://github.com/karpathy/autoresearch). autoprime applies it to prime-generation algorithms.
